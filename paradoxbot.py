@@ -2,6 +2,7 @@
 import sys, os, time, atexit
 import argparse, ConfigParser
 import serial, datetime, time
+import threading, requests
 from signal import SIGTERM
 
 import logging
@@ -19,6 +20,9 @@ def main(appname):
     args = parser.parse_args()
 
     logger = setup_logging(appname, args.loglevel, args.foreground)
+    logging.getLogger("requests").setLevel(logging.ERROR)
+    requests.packages.urllib3.disable_warnings()
+
     defaults, cp = parse_config_file(args.config, parser.print_help)
 
     if args.stop_daemon:
@@ -51,11 +55,22 @@ def main(appname):
     ser.close()
     sys.exit(0)
 
+def call_url(logger, url):
+    r = requests.get(url, verify=False)
+    if r.status_code != 200:
+        logger.error("status code: %d: '%s'" % (r.status_code, r.text))
+
 def paradox_loop(logger, cp, paradox):
     while True:
         event = paradox.get_event()
         if event:
             logger.info("(%-12s): %s" % (event["raw"], event["description"]))
+            if cp.has_section(event["raw"]):
+                for url in [cp.get(event["raw"], option) for option in cp.options(event["raw"]) if "url" in option]:
+                    logger.info("(%-12s): Calling URL '%s'" % (event["raw"], url))
+                    t = threading.Thread(target=call_url, args = (logger, url))
+                    t.daemon = True
+                    t.start()
         
 def setup_logging(appname, level, stdout=False):
     logger = logging.getLogger(appname)
@@ -199,7 +214,7 @@ class Paradox():
         elif data[0] == "R" and data[1] == "A":
             r["event"] = "RA"
             r["zone"] = str(data[2:5])
-            r["status"] = str(data[6:])
+            r["status"] = str(data[5:])
             r["description"] = "Zone %s status is '%s'" % (r["zone"], r["status"])
             return r
 
